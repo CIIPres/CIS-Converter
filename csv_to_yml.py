@@ -2,7 +2,7 @@
 
 import csv
 import re
-import yaml
+
 
 def parse_cis_controls(cis_controls_text):
     """Parse CIS Controls text and extract v8 and v7 controls."""
@@ -38,34 +38,100 @@ def create_registry_rule(cis_num, audit_text):
     if not audit_text:
         return rules
 
-    # Look for HKLM registry paths
-    reg_paths = re.findall(r'(HKLM[^\n]+)', audit_text, re.IGNORECASE)
-
-    # Look for PowerShell commands
+    # Look for PowerShell commands first (more complex checks)
     ps_commands = re.findall(r'\(Get-ItemProperty[^\)]+\)[^\n]+', audit_text)
 
     if ps_commands:
         for cmd in ps_commands:
             # Clean up the PowerShell command
             cmd = cmd.replace('\n', ' ').strip()
-            # Extract the expected value
-            value_match = re.search(r'-> (\d+)', cmd)
-            if value_match:
-                expected_val = value_match.group(1)
-                rules.append(f"c:powershell {cmd}")
-    elif reg_paths:
-        # For simple registry checks, create a basic rule
-        for path in reg_paths[:1]:  # Use first path found
-            # Extract registry path and value name
-            parts = path.split(':')
-            if len(parts) >= 2:
-                reg_path = parts[0].replace('HKLM\\', 'HKEY_LOCAL_MACHINE\\')
-                value_name = parts[1].strip() if len(parts) > 1 else None
+            rules.append(f"c:powershell {cmd}")
+    else:
+        # Look for registry paths in format: HKLM\\path:ValueName
+        # Need to handle line breaks in the CSV data - they can split registry paths and value names
+        # First, join lines that are continuations (don't start with uppercase or number)
+        lines = audit_text.split('\n')
+        joined_lines = []
+        for line in lines:
+            line_stripped = line.strip()
+            if line_stripped and joined_lines and not line_stripped[0].isupper() and not line_stripped[0].isdigit() and line_stripped[0] not in ['H', '{']:
+                # This line is a continuation, append to previous line
+                joined_lines[-1] += line_stripped
+            else:
+                joined_lines.append(line_stripped)
 
-                if value_name:
+        audit_cleaned = ' '.join(joined_lines)
+
+        # Pattern to match registry paths with value names
+        # Format: HKLM\\Path\\To\\Key:ValueName
+        # Value names can contain letters, numbers, and underscores
+        reg_pattern = r'HKLM\\\\(?:[^:\n]+?):([A-Za-z0-9_]+)'
+        matches = re.findall(reg_pattern, audit_cleaned, re.IGNORECASE)
+
+        if matches:
+            # Extract the full registry path
+            # Find the complete registry path including the value name
+            full_matches = re.finditer(r'(HKLM\\\\[^:\n]+?):([A-Za-z0-9_]+)', audit_cleaned, re.IGNORECASE)
+
+            for match in full_matches:
+                reg_path = match.group(1)
+                value_name = match.group(2)
+
+                # Convert HKLM to HKEY_LOCAL_MACHINE
+                reg_path = reg_path.replace('HKLM\\\\', 'HKEY_LOCAL_MACHINE\\')
+                reg_path = reg_path.replace('\\\\', '\\')
+
+                # Look for expected value in audit text
+                # Common patterns: "value of 1", "set to 0", "REG_DWORD value of 1"
+                expected_value = None
+                value_patterns = [
+                    r'value of (\d+)',
+                    r'set to (\d+)',
+                    r'REG_DWORD value of (\d+)',
+                    r'confirm the value is set to (\d+)'
+                ]
+
+                for pattern in value_patterns:
+                    value_match = re.search(pattern, audit_text, re.IGNORECASE)
+                    if value_match:
+                        expected_value = value_match.group(1)
+                        break
+
+                # Build the rule
+                if expected_value:
+                    rules.append(f"r:{reg_path} -> {value_name} -> {expected_value}")
+                else:
                     rules.append(f"r:{reg_path} -> {value_name}")
 
+                # Only use the first complete registry path found
+                break
+
     return rules
+
+
+def clean_text(text):
+    """Remove line breaks and extra whitespace from text."""
+    if not text:
+        return ""
+    # Replace line breaks with spaces
+    text = text.replace('\n', ' ').replace('\r', ' ')
+    # Replace multiple spaces with single space
+    text = re.sub(r'\s+', ' ', text)
+    # Replace double backslashes with single backslashes (from CSV escaping)
+    text = text.replace('\\\\', '\\')
+    # Strip leading/trailing whitespace
+    return text.strip()
+
+
+def escape_yaml_string(text):
+    """Escape special characters for YAML double-quoted strings."""
+    if not text:
+        return ""
+    # Escape backslashes first (must be done before other escapes)
+    text = text.replace('\\', '\\\\')
+    # Escape double quotes
+    text = text.replace('"', '\\"')
+    return text
 
 
 def csv_to_yaml(csv_file, yaml_file, base_id=26000):
@@ -94,6 +160,16 @@ def csv_to_yaml(csv_file, yaml_file, base_id=26000):
             if not cis_num or not policy:
                 continue
 
+            # Store original policy for comment
+            original_policy = policy
+
+            # Clean all text fields to remove line breaks
+            policy = clean_text(policy)
+            description = clean_text(description)
+            rationale = clean_text(rationale)
+            impact = clean_text(impact)
+            remediation = clean_text(remediation)
+
             # Parse CIS Controls
             v8_controls, v7_controls = parse_cis_controls(cis_controls)
 
@@ -111,12 +187,21 @@ def csv_to_yaml(csv_file, yaml_file, base_id=26000):
             if not rules:
                 rules = [f"# TODO: Implement check for CIS {cis_num}"]
 
-            # Extract reference URLs
+            # Extract reference URLs and clean them
             ref_urls = re.findall(r'https?://[^\s\n]+', references)
+            # Clean each reference URL to remove any line breaks that split them
+            cleaned_refs = []
+            for ref in ref_urls:
+                # Remove any line breaks and join if URL was split
+                ref = ref.strip()
+                if ref:
+                    cleaned_refs.append(ref)
+            ref_urls = cleaned_refs
 
-            # Build the check entry
+            # Build the check entry with comment
             check = {
                 'id': check_id,
+                'comment': f"{cis_num} ({profile}) {policy}",  # Comment line
                 'title': policy,
                 'description': description if description else policy,
                 'rationale': rationale if rationale else "See CIS Benchmark for details.",
@@ -130,26 +215,6 @@ def csv_to_yaml(csv_file, yaml_file, base_id=26000):
 
             checks.append(check)
             check_id += 1
-
-    # Create the YAML structure
-    yaml_content = {
-        'policy': {
-            'id': 'cis_win11_enterprise',
-            'file': 'cis_win11_enterprise.yml',
-            'name': 'CIS Microsoft Windows 11 Enterprise Benchmark v4.0.0',
-            'description': 'This document provides prescriptive guidance for establishing a secure configuration posture for Microsoft Windows 11. Please note that the rules provide accurate results for Windows 11 Operating Systems with the System language set to English. The SCA policy will work with other languages but the results will be less accurate due to some of the rules that depend on the System language.',
-            'references': ['https://www.cisecurity.org/cis-benchmarks/']
-        },
-        'requirements': {
-            'title': 'Check that the Windows platform is Windows 11',
-            'description': 'Requirements for running the CIS benchmark Domain Controller under Windows 11',
-            'condition': 'all',
-            'rules': [
-                "r:HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion -> ProductName -> r:^Windows 11"
-            ]
-        },
-        'checks': checks
-    }
 
     # Write YAML file with custom formatting
     with open(yaml_file, 'w', encoding='utf-8') as f:
@@ -166,8 +231,53 @@ def csv_to_yaml(csv_file, yaml_file, base_id=26000):
         f.write("# Based on:\n")
         f.write("# Center for Internet Security Benchmark v4.0.0 for Microsoft Windows 11 Enterprise - 10-22-2025\n\n")
 
-        # Write YAML content
-        yaml.dump(yaml_content, f, default_flow_style=False, allow_unicode=True, sort_keys=False, width=120)
+        # Write policy section
+        f.write("policy:\n")
+        f.write('  id: "cis_win11_enterprise"\n')
+        f.write('  file: "cis_win11_enterprise.yml"\n')
+        f.write('  name: "CIS Microsoft Windows 11 Enterprise Benchmark v4.0.0"\n')
+        f.write('  description: "This document provides prescriptive guidance for establishing a secure configuration posture for Microsoft Windows 11. Please note that the rules provide accurate results for Windows 11 Operating Systems with the System language set to English. The SCA policy will work with other languages but the results will be less accurate due to some of the rules that depend on the System language."\n')
+        f.write('  references:\n')
+        f.write('  - "https://www.cisecurity.org/cis-benchmarks/"\n')
+
+        # Write requirements section
+        f.write("requirements:\n")
+        f.write('  title: "Check that the Windows platform is Windows 11"\n')
+        f.write('  description: "Requirements for running the CIS benchmark Domain Controller under Windows 11"\n')
+        f.write('  condition: all\n')  # No quotes for condition
+        f.write('  rules:\n')
+        f.write(r"  - 'r:HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion -> ProductName -> r:^Windows 11'" + '\n')
+
+        # Write checks section
+        f.write("checks:\n")
+        for i, check in enumerate(checks):
+            # Write comment above the check
+            f.write(f" # {check['comment']}\n")
+            f.write(f"- id: {check['id']}\n")
+            f.write(f'  title: "{escape_yaml_string(check["title"])}"\n')
+            f.write(f'  description: "{escape_yaml_string(check["description"])}"\n')
+            f.write(f'  rationale: "{escape_yaml_string(check["rationale"])}"\n')
+            f.write(f'  impact: "{escape_yaml_string(check["impact"])}"\n')
+            f.write(f'  remediation: "{escape_yaml_string(check["remediation"])}"\n')
+            f.write(f'  references:\n')
+            for ref in check['references']:
+                # Write reference without f-string to avoid escaping backslashes
+                f.write("  - '" + ref + "'\n")
+            f.write(f'  compliance:\n')
+            for comp in check['compliance']:
+                for key, values in comp.items():
+                    # Format as inline array: - cis: ["1.1", "2.2"]
+                    values_str = ', '.join([f'"{v}"' for v in values])
+                    f.write(f'  - {key}: [{values_str}]\n')
+            f.write(f'  condition: {check["condition"]}\n')  # No quotes for condition
+            f.write(f'  rules:\n')
+            for rule in check['rules']:
+                # Write rule without f-string to avoid escaping backslashes
+                f.write("  - '" + rule + "'\n")
+
+            # Add blank line between checks (except after the last one)
+            if i < len(checks) - 1:
+                f.write('\n')
 
     print(f"Converted {len(checks)} checks from {csv_file} to {yaml_file}")
     print(f"Check IDs: {base_id} to {check_id - 1}")

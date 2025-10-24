@@ -297,7 +297,7 @@ class CISConverter:
                 # If the value to be placed in a cell in the row is a list, transform it into a string.
                 if isinstance(row[key], list):
                     row[key] = '\n'.join(row[key])
-                
+
                 # Remove empty lines at the beginning and end of the text in each cell of the row.
                 row[key] = row[key].strip()
 
@@ -306,6 +306,26 @@ class CISConverter:
                     # Replace double \n by single \n and 3 or more \n by 2 \n
                     row[key] = re.sub(r'\n\n', r'\n', row[key])
                     row[key] = re.sub(r'\n{3,}', r'\n\n', row[key])
+
+                # Replace double backslashes with single backslashes (from CSV escaping)
+                row[key] = row[key].replace('\\\\', '\\')
+
+                # Clean references - join split URLs and remove numbered line breaks
+                if key == 'References':
+                    # First, join lines that are part of split URLs
+                    lines = row[key].split('\n')
+                    joined_lines = []
+                    for line in lines:
+                        line = line.strip()
+                        if line:
+                            # If line doesn't start with http/https/number and previous line exists, append to previous
+                            if joined_lines and not line.startswith('http') and not line.startswith('Minimum') and not line.startswith('GRID') and not re.match(r'^\d+\.', line):
+                                joined_lines[-1] += line
+                            else:
+                                joined_lines.append(line)
+                    row[key] = '\n'.join(joined_lines)
+                    # Then remove numbered list patterns like "1. ", "2. ", etc. at the start of lines
+                    row[key] = re.sub(r'^\d+\.\s+', '', row[key], flags=re.MULTILINE)
 
             # Writes the row. Calls the method of the CISConverter object used to create row adapted to the output format.
             self.write_row(row)
