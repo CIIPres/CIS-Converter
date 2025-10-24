@@ -504,7 +504,9 @@ checks:
   - cis_csc_v7: ["0.0"]
   condition: all
   rules:
-  - '# TODO: Implement check for CIS 4.6.11.1'
+  - 'r:HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\NetworkProvider\HardenedPaths'
+  - 'r:HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\NetworkProvider\HardenedPaths -> \\*\NETLOGON'
+  - 'r:HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\NetworkProvider\HardenedPaths -> \\*\SYSVOL'
 
  # 4.6.17.1 (L2) Ensure 'Configuration of wireless settings using Windows Connect Now' is set to 'Disabled'
 - id: 26028
